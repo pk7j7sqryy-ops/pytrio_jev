@@ -1,0 +1,78 @@
+canonical record 格式：
+**规范化标准记录格式**：给同一个现实实体（人 / 商品 / 订单 / 设备等），一套**跨系统统一、去重、归一、字段固定、可交换**的标准记录结构，也就是这个实体的「标准正本」
+
+## 目标
+
+编写一个 Python 数据准备脚本 `00-prepare-data.py`，用于为 PyTRIO-Jev 决策模型下载、清洗、转换并切分训练、开发、校准和评测数据。
+
+脚本从仓库根目录运行：
+
+uv run python 09-pytrio-jev/00-prepare-data.py
+
+数据文件写入脚本所在目录下的 `datasets/`，评测集写入 `datasets/eval/`。
+
+## 背景
+
+项目将通用大模型训练为固定候选决策模型。训练样本采用统一的 canonical record 格式：
+
+{
+  "id": "样本ID",
+  "state": {},
+  "questions": {
+    "字段名": {
+      "type": "choice | noul | score",
+      "instructions": "问题说明",
+      "criteria": {}
+    }
+  },
+  "targets": {
+    "字段名": {
+      "label": "正确标签"
+    }
+  }
+}
+
+数据来源有两个：
+
+1. Hugging Face 数据集 `LocalLLaMA/typed-decisions`，包含多个 workflow。需要转换为统一格式，并按 workflow 做确定性切分。
+2. Hugging Face 数据集 `Team-ACE/ToolACE`，需要从工具调用对话中筛选可转换为单工具选择题的样本。
+
+评测数据从 Intern-Decision 仓库下载，包含 Jevbench Easy、Original、Hard、Typed Decisions test 和 ToolACE test 五个 JSONL 文件。评测集不能混入训练集。
+
+## 步骤 & 约束
+0. 所有数据集仅下载第一行 先看看格式
+1. 使用 `pathlib.Path(__file__).resolve().parent` 确定脚本目录，并据此构造 `datasets/` 和 `datasets/eval/` 路径；不要依赖当前工作目录。
+2. 定义数据集仓库名、采样数量、随机种子和评测数据下载地址等配置常量。
+3. 下载五个评测 JSONL 文件到 `datasets/eval/`：
+   - Jevbench Easy
+   - Jevbench Original
+   - Jevbench Hard
+   - Typed Decisions test
+   - ToolACE test
+   如果目标文件已经存在，则跳过下载；下载后打印文件名和行数。
+4. 读取 Typed Decisions 的 `train` split：
+   - 将 JSON 字符串字段解析为 Python 对象。
+   - 将每行转换为 canonical record。
+   - 从 `gold` 中提取每个问题字段的硬标签，写入 `targets[field]["label"]`。
+   - 按 `workflow` 分组并排序。
+   - 在每个 workflow 内按 `SHA256(固定切分种子 + 样本ID)` 排序，保证切分可复现。
+   - 每个 workflow 固定取前 240 条作为训练数据、接下来的 30 条作为开发数据、再接下来的 30 条作为校准数据。
+5. 处理 ToolACE：
+   - 从下载的 ToolACE 评测文件读取 310 条评测请求，并将请求文本规范化为小写、折叠空白后的指纹集合。
+   - 读取 ToolACE 的 `train` split。
+   - 只保留系统提示中含有工具目录标记的记录；用 JSON 解码器解析工具列表。
+   - 至少有两个候选工具才继续处理。
+   - 在对话中查找 user 消息及其紧随其后的 assistant 消息。
+   - 从 assistant 回复中识别被调用的工具；只保留恰好调用一个候选工具的样本。
+   - 排除与 ToolACE 评测请求指纹相同的训练请求。
+   - 将请求、候选工具名称与描述转换成一个 `choice` 类型的 canonical record，正确标签为被调用的工具名。
+   - 使用固定随机种子打乱候选样本，并取前 1200 条；为选中样本生成稳定格式的 `toolace-00000` 等 ID。
+6. 将 Typed Decisions 训练样本与 ToolACE 训练样本合并，再用固定随机种子打乱。
+7. 将训练集、开发集和校准集分别写入：
+   - `datasets/train.jsonl`
+   - `datasets/dev.jsonl`
+   - `datasets/calibration.jsonl`
+8. JSONL 必须采用 UTF-8 编码，每行一个 JSON 对象，使用 `ensure_ascii=False` 保留非 ASCII 字符；写入后打印文件名和样本数。
+9. 代码使用清晰的小函数组织职责，例如评测文件下载、Typed Decisions 转换与切分、ToolACE 转换与抽样、JSONL 写入，以及 `main()`。
+10. 添加类型标注和简洁的函数说明；使用 `if __name__ == "__main__":` 作为脚本入口。
+11. 不要改写或覆盖评测集内容；不要把测试样本用于训练；所有随机抽样和数据切分必须可复现。
