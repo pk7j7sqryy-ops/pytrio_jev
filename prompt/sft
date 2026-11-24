@@ -1,0 +1,26 @@
+# 目标
+
+编写一个 Python 训练脚本 `train.py`，使用 PyTRIO 对决策模型进行异步 LoRA masked SFT。脚本读取 canonical JSONL 训练数据，把每条样本编码为模型输入，并且只在答案占位符对应的位置监督正确答案符号。训练过程中记录 loss 和训练指标，按配置保存可用于推理的权重。
+
+# 背景
+
+项目使用 canonical record 格式保存决策样本，每条记录包含 `id`、`state`、`questions` 和 `targets`。数据由 `data.py` 中的 `load_jsonl` 读取，并由 `Encoder` 转换成 PyTRIO `Datum`。`Encoder.build_sft_datum()` 已经负责生成 token、正确答案符号及稀疏 loss mask；训练脚本应复用它，不要重复实现编码逻辑。
+
+训练应使用 PyTRIO `ServiceClient` 创建 LoRA `TrainingClient`，用 `forward_backward_async(..., "cross_entropy")` 提交批次，再调用 `optim_step_async()` 更新参数。用 SwanLab 记录实验配置、归一化 loss、监督 token 数和服务端训练指标。推理权重通过 `save_weights_for_sampler_async()` 保存。
+
+训练参数支持命令行、脚本同目录 `.env` 和代码默认值，优先级为：命令行参数 > `.env` 环境变量 > 代码默认值。当前默认训练文件为 `datasets/train.jsonl`，默认基座模型为 `Qwen/Qwen3.5-4B`。
+
+# 步骤与约束
+
+1. 使用 `Path(__file__).resolve().parent` 确定脚本目录，默认训练数据路径和 `.env` 路径均相对于脚本目录构造，不依赖当前工作目录。
+2. 使用 `python-dotenv` 加载脚本目录下的 `.env`。为训练数据路径、基座模型、LoRA rank、epochs、batch size、learning rate、max samples、seed、save interval、SwanLab mode/project、实验名和权重名提供对应环境变量；未设置时使用原有合理默认值。
+3. 使用 `argparse` 定义同名命令行参数。确保显式传入的命令行值覆盖环境变量；数值型环境变量应转换为对应类型。实验名和权重名未指定时，根据基座模型名称自动生成。
+4. 读取 JSONL 训练记录；`max_samples > 0` 时限制使用的样本数量，`0` 表示使用全部数据。打印样本数和 PyTRIO 版本。
+5. 创建 PyTRIO LoRA 训练客户端，传入基座模型、rank 和随机种子；获取 tokenizer，构造 `Encoder` 和 Adam 参数。
+6. 初始化 SwanLab 实验并记录算法、数据集、数据量、基座模型、PyTRIO 版本和训练超参数。
+7. 每个 epoch 使用 `seed + epoch` 可复现地打乱样本。按完整 batch 迭代；每条记录调用 `encoder.build_sft_datum()`，监督 token 数由 datum 的 loss weights 计算。只训练完整 batch，不足一个 batch 的尾部样本可跳过。
+8. 对每批调用 `forward_backward_async` 和 `optim_step_async`，把等待结果、归一化 loss 计算、SwanLab 上报及日志输出放入异步任务，以维持训练流水线。归一化 loss 使用服务端 `loss_sum / supervised_tokens`。
+9. 当 `save_every > 0` 且达到保存间隔时，先等待并清空待处理日志任务，再保存推理权重；每个 epoch 结束时也保存一次，避免同一 step 重复保存。
+10. 使用 `try/finally` 确保 SwanLab run 在训练结束或异常时调用 `finish()`。脚本入口使用 `if __name__ == "__main__":`，通过 `asyncio.run()` 启动训练并打印总耗时。
+11. 不要在训练脚本里实现数据下载、数据切分、评测或校准；不要把普通语言 token 全部设为训练目标；不要绕过 `Encoder` 的 marker 定位与稀疏监督机制；不要硬编码密钥或提交真实 `.env` 内容。
+12. 保持代码简洁、函数职责清晰，添加必要类型标注和简短说明；遵守项目已锁定的 PyTRIO API，不擅自升级依赖。
