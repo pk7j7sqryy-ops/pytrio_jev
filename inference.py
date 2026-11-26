@@ -34,24 +34,15 @@ def _field_logprobs(encoder: Encoder, encoded: dict, response) -> dict:
     """
     assert response.input_tokens == len(encoded["ids"]), "本地/远端 prompt 长度不一致"
     fields: dict[str, dict[str, float]] = {}
-    for field, position in encoded[
-        "markers"
-    ].items():  ##markers= {'team': 303, 'urgency': 312, 'refund_requested': 321}
-        # 找到对应marker位置token的topk概率凑成字典{位置：概率}{32: -0.0018220028141513467, 33: -6.626821994781494, 34: -7.626821994781494}
-        topk = dict(
-            response.topk_prompt_logprobs[position]
-        )  # [None, [(846, -0.22570660710334778), (8678, -1.6007065773010254), (1785, -9.038207054138184)], [(198, -0.01626366749405861), (2
-        # 找最小概率然后-10
-        floor = min(topk.values()) - 10.0  # top-k 里最小那个概率再减 10
-        # 取对应每个选项的值
+    for field, position in encoded["markers"].items():
+        # 读取该字段答案占位符位置的候选 token logprob。
+        topk = dict(response.topk_prompt_logprobs[position])
+        # 候选 token 未出现在 top-k 时，用低分近似其概率为 0。
+        floor = min(topk.values()) - 10.0
         fields[field] = {
             symbol: topk.get(encoder.symbol_token_id(symbol), floor)
-            for symbol, _, _ in encoded["options"][field]  # 取对应的选择A，B，C，D
+            for symbol, _, _ in encoded["options"][field]
         }
-    #         print('encoded["options"][field]=',encoded["options"][field])#[('A', 'billing', 'Payments and refunds'), ('B', 'delivery', 'Shipping and delivery'), ('C', 'technical', 'Product technical support')]
-    # fields= {'team': {'A': -0.0018878034316003323, 'B': -6.626887798309326, 'C': -7.501887798309326}}
-    #         print('fields=',fields)
-    # print('fields=',fields)#{'team': {'A': -0.0018878034316003323, 'B': -6.626887798309326, 'C': -7.501887798309326}, 'urgency': {'A': -6.756525039672852, 'B': -5.256525039672852, 'C': -0.0065251621417701244}, 'refund_requested': {'A': -5.504185199737549, 'B': -0.0041853697039186954}}
 
     return {"encoded": encoded, "logprobs": fields}
 
@@ -63,38 +54,16 @@ def candidate_logprobs(
 ) -> dict:
     """一次前向，返回 {field: {symbol: logprob}}（未归一、未加温度）。"""
     encoded = encoder.encode(record, include_targets=False)
-    # print(encoded["messages"])
-    # print(encoded["ids"])
-    # tokenizer = sampling_client.get_tokenizer()
-    # ids = tokenizer.encode(
-    #     tokenizer.apply_chat_template(
-    #         encoded["messages"], chat_template=encoder.template, tokenize=False
-    #     ),
-    #     add_special_tokens=False,
-    # )
-    # print(ids)
-    # 用加上占位符号的tokenid，作为推理输入
+    # 使用带答案占位符的 token 序列作为推理输入。
     response = sampling_client.sample(
         prompt=trio.ModelInput.from_ints(encoded["ids"]),
         num_samples=1,
         sampling_params=trio.SamplingParams(max_tokens=1),
-        include_prompt_logprobs=True,  # 每个
+        include_prompt_logprobs=True,
         topk_prompt_logprobs=max(
             len(opts) for opts in encoded["options"].values()
-        ),  # 取最多的概率分布，比如问题A：三个选项，问题B：2个选项。那占位符号输出概率就是三个后选项
+        ),  # 取所有字段中最多的候选数，覆盖每个字段的选项。
     ).result()
-    # print(response)
-    # 描述eos结束符号信息：response.sequences= [SampleSequence(stop_reason='stop', tokens=[248044], text='', logprobs=[-0.0001456631434848532])]
-    #
-    # print('response.sequences=',response.sequences)
-    # print('markers=',encoded["markers"])#markers= {'team': 303, 'urgency': 312, 'refund_requested': 321}
-    # print('prompt_logprobs=', response.prompt_logprobs)  # 327
-    # print('prompt_logprobs=',len(response.prompt_logprobs))#327
-    # print('topk_prompt_logprobs=',response.topk_prompt_logprobs)#327
-    # print('topk_prompt_logprobs=',len(response.topk_prompt_logprobs))#327
-    # print('encoded["ids"]=',len(encoded["ids"]))#327
-    # print('response.topk_prompt_logprobs[303]=',dict(response.topk_prompt_logprobs[303]))
-    # print('output_tokens=', response.output_tokens)  # 1
     for i, seq in enumerate(response.sequences):
         print(f"Sample {i + 1}: {repr(seq)}")
     return _field_logprobs(encoder, encoded, response)
@@ -125,11 +94,7 @@ def softmax(logprobs: np.ndarray, temperature: float = 1.0) -> np.ndarray:
 
 
 def _computer_believe(kind: str, probabilities: dict[str, float]) -> float:
-    """
-    Jev（TypeSafe 原版）执信度计算
-    kind：具体type
-    probabilities：{'billing': 0.9186083251288092, 'delivery': 0.06654375594933727, 'technical': 0.014847918921853654}
-    """
+    """根据题型和候选概率计算置信度。"""
     if not probabilities:
         return 0.0
 
@@ -161,16 +126,15 @@ def _computer_believe(kind: str, probabilities: dict[str, float]) -> float:
 def _build_decisions(
     record: dict, encoded: dict, logprobs: dict, temperature: float
 ) -> dict[str, dict]:
-    """候选 logprob → 各字段的分布与预测。
-    #选值
-    choice → {value: prob} + argmax；noul → p_yes；score → 概率加权的期望分。
+    """将候选 logprob 转为字段概率分布和预测结果。
+
+    choice 返回最高概率选项，noul 返回 yes 概率，score 返回期望分。
     """
     out: dict[str, dict] = {}
     for field, options in encoded["options"].items():
         symbols = [symbol for symbol, _, _ in options]
         probs = softmax(np.array([logprobs[field][s] for s in symbols]), temperature)
         by_value = {value: float(p) for (_, value, _), p in zip(options, probs)}
-        # print('by_value=',by_value)#{'billing': 0.9186083251288092, 'delivery': 0.06654375594933727, 'technical': 0.014847918921853654}
         question = record["questions"][field]
         kind = question["type"]
         result: dict = {"type": kind, "probabilities": by_value}
@@ -322,7 +286,6 @@ def main() -> None:
 
     for record in records:
         result = decide(sampling_client, encoder, record, args.temperature)
-        # print()
         print(f"\n=== {record['id']} ===")
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
