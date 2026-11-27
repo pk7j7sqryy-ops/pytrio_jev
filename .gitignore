@@ -168,7 +168,9 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-
+/README2.md
+/README-backup.md
+/.gitignore
 # Spyder project settings
 .spyderproject
 .spyproject
