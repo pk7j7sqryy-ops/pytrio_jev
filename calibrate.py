@@ -27,7 +27,7 @@ from inference import candidate_logprobs_async
 SCRIPT_DIR = Path(__file__).resolve().parent
 load_dotenv(SCRIPT_DIR / "jev" / ".env")
 DEFAULT_DATA = SCRIPT_DIR / "datasets" / "calibration.jsonl"
-DEFAULT_OUTPUT = SCRIPT_DIR / "outputs" / "calibration.json"
+DEFAULT_OUTPUT = SCRIPT_DIR / "outputs" / "calibration1.json"
 DEFAULT_MODEL = "Qwen/Qwen3.5-4B"
 
 

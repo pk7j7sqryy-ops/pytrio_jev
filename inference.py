@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -43,7 +44,7 @@ def _field_logprobs(encoder: Encoder, encoded: dict, response) -> dict:
             symbol: topk.get(encoder.symbol_token_id(symbol), floor)
             for symbol, _, _ in encoded["options"][field]
         }
-
+    print({"encoded": encoded, "logprobs": fields})
     return {"encoded": encoded, "logprobs": fields}
 
 
@@ -55,6 +56,7 @@ def candidate_logprobs(
     """一次前向，返回 {field: {symbol: logprob}}（未归一、未加温度）。"""
     encoded = encoder.encode(record, include_targets=False)
     # 使用带答案占位符的 token 序列作为推理输入。
+    sample_started = time.perf_counter()
     response = sampling_client.sample(
         prompt=trio.ModelInput.from_ints(encoded["ids"]),
         num_samples=1,
@@ -64,9 +66,15 @@ def candidate_logprobs(
             len(opts) for opts in encoded["options"].values()
         ),  # 取所有字段中最多的候选数，覆盖每个字段的选项。
     ).result()
+    sample_seconds = time.perf_counter() - sample_started
+    print(encoded["ids"])
+    print(response.output_tokens)
+    print(response.topk_prompt_logprobs)
     for i, seq in enumerate(response.sequences):
         print(f"Sample {i + 1}: {repr(seq)}")
-    return _field_logprobs(encoder, encoded, response)
+    collected = _field_logprobs(encoder, encoded, response)
+    collected["sample_seconds"] = sample_seconds
+    return collected
 
 
 async def candidate_logprobs_async(
@@ -159,9 +167,14 @@ def decide(
     encoder: Encoder,
     record: dict,
     temperature: float = 1.0,
+    *,
+    stats: dict[str, int | float] | None = None,
 ) -> dict[str, dict]:
     """对一条记录输出各字段的分布与预测（同步版）。"""
     collected = candidate_logprobs(sampling_client, encoder, record)
+    if stats is not None:
+        stats["input_tokens"] = len(collected["encoded"]["ids"])
+        stats["sample_seconds"] = collected["sample_seconds"]
     return _build_decisions(
         record, collected["encoded"], collected["logprobs"], temperature
     )
@@ -284,10 +297,35 @@ def main() -> None:
             },
         ]
 
+    total_input_tokens = 0
+    total_answers = 0
+    total_elapsed = 0.0
+    total_sample_seconds = 0.0
     for record in records:
-        result = decide(sampling_client, encoder, record, args.temperature)
+        stats: dict[str, int | float] = {}
+        record_started = time.perf_counter()
+        result = decide(sampling_client, encoder, record, args.temperature, stats=stats)
+        elapsed = time.perf_counter() - record_started
+        input_tokens = int(stats["input_tokens"])
+        sample_seconds = float(stats["sample_seconds"])
+        answers = len(result)
+        total_input_tokens += input_tokens
+        total_answers += answers
+        total_elapsed += elapsed
+        total_sample_seconds += sample_seconds
         print(f"\n=== {record['id']} ===")
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(
+            f"输入 {input_tokens} tokens，预测 {answers} 个答案，"
+            f"采样 {sample_seconds:.3f} 秒，推理 {elapsed:.3f} 秒"
+        )
+
+    print(
+        f"\n合计：{len(records)} 条记录，输入 {total_input_tokens} tokens，"
+        f"预测 {total_answers} 个答案，采样 {total_sample_seconds:.3f} 秒，"
+        f"推理 {total_elapsed:.3f} 秒，"
+        f"{total_answers / total_elapsed if total_elapsed else 0:.2f} 答案/秒"
+    )
 
 
 if __name__ == "__main__":
