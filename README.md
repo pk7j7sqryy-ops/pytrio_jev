@@ -6,7 +6,7 @@
 
 **代码与复现资源**
 
-- 完整代码：[pytrio_jev](https://github.com/pk7j7sqryy-ops/pytrio_jev) / 快速启动：[`start.md`](https://github.com/KMnO4-zx/agentic-rl-lab/blob/main/09-pytrio-jev/start.md)
+- 完整代码：[pytrio_jev](https://github.com/pk7j7sqryy-ops/pytrio_jev) / 快速启动：[`start.md`](https://github.com/pk7j7sqryy-ops/pytrio_jev)
 - 方法参考：[`09-pytrio-jev`](https://github.com/KMnO4-zx/agentic-rl-lab/tree/main/09-pytrio-jev)、[Intern-Decision](https://github.com/InternLM/Intern-Decision)、[Jev 架构逆向](https://archerhume.com/posts/jevs-architecture-unmasked)、[Datawhale AgentJev 教程](https://mp.weixin.qq.com/s/F7i83rn8oDzQ-sg13MKwWA)
 - 训练数据：[`LocalLLaMA/typed-decisions`](https://huggingface.co/datasets/LocalLLaMA/typed-decisions)、[`Team-ACE/ToolACE`](https://huggingface.co/datasets/Team-ACE/ToolACE)
 - SwanLab：[查看本次实验公开的训练记录](https://swanlab.cn/@js9527/agentic-rl-lab-pytrio-jev/v1/8w9aka/runs?utm_source=website_qr&utm_medium=qr_scan)
